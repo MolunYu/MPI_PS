@@ -62,7 +62,7 @@ int main(int argc, char *argv[]) {
         delete[] gradient_recv_request;
         delete[] gradient_recv_status;
     } else {
-        Model model;
+        MyModel model;
         MPI_Status status;
         double gradients[params_size];
 
@@ -84,6 +84,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        MPI_Send(&rank, 1, MPI_INT, tag_exit, server_rank, MPI_COMM_WORLD);
     }
 
 
