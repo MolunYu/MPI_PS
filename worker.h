@@ -13,24 +13,7 @@
 class Model {
 public:
     Model() { gaussian_init(); }
-
     ~Model() {}
-
-    void getGradient(double *data, double *labels, double *gradients, int data_len) {
-        forward(data, data_len);
-        backward(labels, gradients);
-    }
-
-    double params[params_size];
-
-private:
-
-    double outputs[params_size];
-
-    virtual void forward(double *data, int data_len) = 0;
-
-    virtual void backward(double *label, double *gradients) = 0;
-
 
     void gaussian_init() {
         std::random_device rd;
@@ -41,6 +24,17 @@ private:
             params[i] = norm(e);
         }
     }
+
+    void getGradient(double *data, double *labels, double *gradients, int data_len) {
+        forward(data, data_len);
+        backward(labels, gradients);
+    }
+
+    virtual void forward(double *data, int data_len) = 0;
+    virtual void backward(double *label, double *gradients) = 0;
+
+    double params[params_size];
+    double outputs[params_size];
 };
 
 

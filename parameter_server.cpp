@@ -13,3 +13,9 @@ void gaussian_init(double *params, int params_size) {
         params[i] = norm(e);
     }
 }
+
+void sgd(double *params, double *gradient, int param_size, double lr=0.001) {
+    for (int i = 0; i < param_size; ++i) {
+        params[i] -= lr * gradient[i];
+    }
+}
