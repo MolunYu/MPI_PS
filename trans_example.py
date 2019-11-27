@@ -4,6 +4,7 @@ import torch.nn as nn
 import numpy as np
 import json
 import pickle
+from collections import OrderedDict
 import matplotlib.pyplot as plt
 
 comm = MPI.COMM_WORLD
@@ -57,5 +58,13 @@ else:
 
     data = bytearray(800)
     comm.Recv(data, source=0, tag=200)
-    model.load_state_dict(pickle.loads(data))
+    remote_state_dict = OrderedDict(pickle.loads(data))
+    local_state_dict = model.state_dict()
+
+    for key in remote_state_dict:
+        local_state_dict[key] += remote_state_dict[key]
+        local_state_dict[key] /= 2
+
+    model.load_state_dict(local_state_dict)
+
 
