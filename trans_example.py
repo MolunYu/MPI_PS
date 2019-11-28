@@ -1,7 +1,6 @@
 import torch
 import sys
 import torch.nn as nn
-import numpy as np
 import pickle
 import torchvision
 import torch.utils.data as data
@@ -26,21 +25,18 @@ tag_params_trans = 1
 input_size = 784
 hidden_size = 500
 num_classes = 10
-num_epochs = 20
-batch_size = 32
+num_epochs = 5
+batch_size = 64
 learning_rate = 0.001
 
 # MNIST dataset
 global_dataset = torchvision.datasets.MNIST(root='./',
-                                            train=False,
+                                            train=True,
                                             transform=transforms.ToTensor(),
-                                            download=True)
+                                            download=False)
 local_dataset_len = len(global_dataset) // worker_size
 
-if rank != server_rank:
-    indices = rank
-else:
-    indices = 0
+indices = rank if rank != server_rank else 0
 
 train_dataset = data.Subset(global_dataset, range(local_dataset_len * indices, local_dataset_len * (indices + 1)))
 train_loader = data.DataLoader(dataset=train_dataset,
@@ -78,15 +74,17 @@ if rank == server_rank:
     model = NeuralNet(input_size, hidden_size, num_classes).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     data = [bytearray(trans_size)] * worker_size
+    recv_request = [None] * worker_size
+    send_request = [None] * worker_size
 
     for epoch in range(num_epochs):
         for _ in train_loader:
-            recv_request = [None] * worker_size
-            send_request = [None] * worker_size
+            for i in range(worker_size):
+                send_request[i] = comm.Isend(pickle.dumps(model.state_dict()), dest=i, tag=tag_params_trans)
+            MPI.Request.Waitall(send_request)
 
             for i in range(worker_size):
                 recv_request[i] = comm.Irecv(data[i], source=i, tag=tag_gradient_trans)
-
             MPI.Request.Waitall(recv_request)
 
             grads = [dict(pickle.loads(i)) for i in data]
@@ -95,10 +93,6 @@ if rank == server_rank:
             for name, param in model.named_parameters():
                 param.grad = sum([grad[name] for grad in grads])
             optimizer.step()
-
-            for i in range(worker_size):
-                send_request[i] = comm.Isend(pickle.dumps(model.state_dict()), dest=i, tag=tag_params_trans)
-            MPI.Request.Waitall(send_request)
 
     with torch.no_grad():
         correct = 0
@@ -125,6 +119,10 @@ else:
     total_step = len(train_loader)
     for epoch in range(num_epochs):
         for i, (images, labels) in enumerate(train_loader):
+            comm.Recv(data, source=server_rank, tag=tag_params_trans)
+            remote_state_dict = OrderedDict(pickle.loads(data))
+            model.load_state_dict(remote_state_dict)
+
             # Move tensors to the configured device
             images = images.reshape(-1, 28 * 28).to(device)
             labels = labels.to(device)
@@ -140,11 +138,3 @@ else:
             grads = {name: param.grad for name, param in model.named_parameters()}
 
             comm.Send(pickle.dumps(grads), dest=server_rank, tag=tag_gradient_trans)
-
-            comm.Recv(data, source=server_rank, tag=tag_params_trans)
-            remote_state_dict = OrderedDict(pickle.loads(data))
-            model.load_state_dict(remote_state_dict)
-
-            # if (i + 1) % 10 == 0:
-            #     print('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}'
-            #           .format(epoch + 1, num_epochs, i + 1, total_step, loss.item()))
