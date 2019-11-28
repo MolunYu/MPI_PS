@@ -1,11 +1,16 @@
-from mpi4py import MPI
 import torch
+import sys
 import torch.nn as nn
 import numpy as np
 import pickle
-import sys
-import matplotlib.pyplot as plt
+import torchvision
+import torch.utils.data as data
+import torchvision.transforms as transforms
+from mpi4py import MPI
 from collections import OrderedDict
+
+# Device configuration
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Init
 comm = MPI.COMM_WORLD
@@ -18,73 +23,124 @@ tag_gradient_trans = 0
 tag_params_trans = 1
 
 # Hyper-parameters
-input_size = 1
-output_size = 1
-num_epochs = 60
+input_size = 784
+hidden_size = 500
+num_classes = 10
+num_epochs = 20
+batch_size = 64
 learning_rate = 0.001
 
-# Toy dataset
-x_train = np.array([[3.3], [4.4], [5.5], [6.71], [6.93], [4.168],
-                    [9.779], [6.182], [7.59], [2.167], [7.042],
-                    [10.791], [5.313], [7.997], [3.1]], dtype=np.float32)
+# MNIST dataset
+global_dataset = torchvision.datasets.MNIST(root='./',
+                                            train=False,
+                                            transform=transforms.ToTensor(),
+                                            download=True)
+local_dataset_len = len(global_dataset) // size
+train_dataset = data.Subset(global_dataset, range(local_dataset_len * rank, local_dataset_len * (rank + 1)))
 
-y_train = np.array([[1.7], [2.76], [2.09], [3.19], [1.694], [1.573],
-                    [3.366], [2.596], [2.53], [1.221], [2.827],
-                    [3.465], [1.65], [2.904], [1.3]], dtype=np.float32)
+test_dataset = torchvision.datasets.MNIST(root='./',
+                                          train=False,
+                                          transform=transforms.ToTensor())
 
-model = nn.Linear(input_size, output_size)
+# Data loader
+train_loader = data.DataLoader(dataset=train_dataset,
+                               batch_size=batch_size,
+                               shuffle=True)
+
+test_loader = data.DataLoader(dataset=test_dataset,
+                              batch_size=batch_size,
+                              shuffle=False)
+
+
+# Fully connected neural network with one hidden layer
+class NeuralNet(nn.Module):
+    def __init__(self, input_size, hidden_size, num_classes):
+        super(NeuralNet, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        out = self.fc1(x)
+        out = self.relu(out)
+        out = self.fc2(out)
+        return out
+
+
+model = NeuralNet(input_size, hidden_size, num_classes).to(device)
 trans_size = sys.getsizeof(pickle.dumps(model.state_dict()))
 
 if rank == server_rank:
-    model = nn.Linear(input_size, output_size)
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    model = NeuralNet(input_size, hidden_size, num_classes).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    data = [bytearray(trans_size)] * worker_size
 
     for epoch in range(num_epochs):
-        data = [bytearray(trans_size)] * worker_size
-        recv_request = [None] * worker_size
-        send_request = [None] * worker_size
+        for _ in train_loader:
+            recv_request = [None] * worker_size
+            send_request = [None] * worker_size
 
-        for i in range(worker_size):
-            recv_request[i] = comm.Irecv(data[i], source=0, tag=tag_gradient_trans)
+            for i in range(worker_size):
+                recv_request[i] = comm.Irecv(data[i], source=i, tag=tag_gradient_trans)
 
-        MPI.Request.Waitall(recv_request)
+            MPI.Request.Waitall(recv_request)
 
-        grads = [dict(pickle.loads(i)) for i in data]
+            grads = [dict(pickle.loads(i)) for i in data]
 
-        optimizer.zero_grad()
-        for name, param in model.named_parameters():
-            param.grad = sum([grad[name] for grad in grads])
-        optimizer.step()
+            optimizer.zero_grad()
+            for name, param in model.named_parameters():
+                param.grad = sum([grad[name] for grad in grads])
+            optimizer.step()
 
-        for i in range(worker_size):
-            send_request[i] = comm.Isend(pickle.dumps(model.state_dict()), dest=0, tag=tag_params_trans)
-        MPI.Request.Waitall(send_request)
+            for i in range(worker_size):
+                send_request[i] = comm.Isend(pickle.dumps(model.state_dict()), dest=i, tag=tag_params_trans)
+            MPI.Request.Waitall(send_request)
+
+    with torch.no_grad():
+        correct = 0
+        total = 0
+        for images, labels in test_loader:
+            images = images.reshape(-1, 28 * 28).to(device)
+            labels = labels.to(device)
+            outputs = model(images)
+            _, predicted = torch.max(outputs.detach(), 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+        print('Accuracy of the network on the 10000 test images: {} %'.format(100 * correct / total))
 
 else:
-    model = nn.Linear(input_size, output_size)
+    model = NeuralNet(input_size, hidden_size, num_classes).to(device)
+    data = bytearray(trans_size)
 
     # Loss and optimizer
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     # Train the model
+    total_step = len(train_loader)
     for epoch in range(num_epochs):
-        # Convert numpy arrays to torch tensors
-        inputs = torch.from_numpy(x_train)
-        targets = torch.from_numpy(y_train)
+        for i, (images, labels) in enumerate(train_loader):
+            # Move tensors to the configured device
+            images = images.reshape(-1, 28 * 28).to(device)
+            labels = labels.to(device)
 
-        # Forward pass
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
+            # Forward pass
+            outputs = model(images)
+            loss = criterion(outputs, labels)
 
-        # Backward and optimize
-        optimizer.zero_grad()
-        loss.backward()
-        grads = {name: param.grad for name, param in model.named_parameters()}
+            # Backward and optimize
+            optimizer.zero_grad()
+            loss.backward()
 
-        comm.Send(pickle.dumps(grads), dest=1, tag=tag_gradient_trans)
+            grads = {name: param.grad for name, param in model.named_parameters()}
 
-        data = bytearray(trans_size)
-        comm.Recv(data, source=1, tag=tag_params_trans)
-        remote_state_dict = OrderedDict(pickle.loads(data))
-        model.load_state_dict(remote_state_dict)
+            comm.Send(pickle.dumps(grads), dest=server_rank, tag=tag_gradient_trans)
+
+            comm.Recv(data, source=server_rank, tag=tag_params_trans)
+            remote_state_dict = OrderedDict(pickle.loads(data))
+            model.load_state_dict(remote_state_dict)
+
+            if (i + 1) % 10 == 0:
+                print('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}'
+                      .format(epoch + 1, num_epochs, i + 1, total_step, loss.item()))
