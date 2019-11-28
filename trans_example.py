@@ -27,7 +27,7 @@ input_size = 784
 hidden_size = 500
 num_classes = 10
 num_epochs = 20
-batch_size = 64
+batch_size = 32
 learning_rate = 0.001
 
 # MNIST dataset
@@ -35,17 +35,21 @@ global_dataset = torchvision.datasets.MNIST(root='./',
                                             train=False,
                                             transform=transforms.ToTensor(),
                                             download=True)
-local_dataset_len = len(global_dataset) // size
-train_dataset = data.Subset(global_dataset, range(local_dataset_len * rank, local_dataset_len * (rank + 1)))
+local_dataset_len = len(global_dataset) // worker_size
+
+if rank != server_rank:
+    indices = rank
+else:
+    indices = 0
+
+train_dataset = data.Subset(global_dataset, range(local_dataset_len * indices, local_dataset_len * (indices + 1)))
+train_loader = data.DataLoader(dataset=train_dataset,
+                               batch_size=batch_size,
+                               shuffle=True)
 
 test_dataset = torchvision.datasets.MNIST(root='./',
                                           train=False,
                                           transform=transforms.ToTensor())
-
-# Data loader
-train_loader = data.DataLoader(dataset=train_dataset,
-                               batch_size=batch_size,
-                               shuffle=True)
 
 test_loader = data.DataLoader(dataset=test_dataset,
                               batch_size=batch_size,
@@ -141,6 +145,6 @@ else:
             remote_state_dict = OrderedDict(pickle.loads(data))
             model.load_state_dict(remote_state_dict)
 
-            if (i + 1) % 10 == 0:
-                print('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}'
-                      .format(epoch + 1, num_epochs, i + 1, total_step, loss.item()))
+            # if (i + 1) % 10 == 0:
+            #     print('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}'
+            #           .format(epoch + 1, num_epochs, i + 1, total_step, loss.item()))
