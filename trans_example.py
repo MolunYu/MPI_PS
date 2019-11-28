@@ -7,9 +7,15 @@ import sys
 import matplotlib.pyplot as plt
 from collections import OrderedDict
 
+# Init
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
+server_rank = worker_size = size - 1
+
+# tag
+tag_gradient_trans = 0
+tag_params_trans = 1
 
 # Hyper-parameters
 input_size = 1
@@ -27,11 +33,34 @@ y_train = np.array([[1.7], [2.76], [2.09], [3.19], [1.694], [1.573],
                     [3.465], [1.65], [2.904], [1.3]], dtype=np.float32)
 
 model = nn.Linear(input_size, output_size)
-grads = {name: param.grad for name, param in model.named_parameters()}
-grads_size = sys.getsizeof(pickle.dumps(grads))
-state_dict_size = sys.getsizeof(pickle.dumps(model.state_dict()))
+trans_size = sys.getsizeof(pickle.dumps(model.state_dict()))
 
-if rank == 0:
+if rank == server_rank:
+    model = nn.Linear(input_size, output_size)
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+
+    for epoch in range(num_epochs):
+        data = [bytearray(trans_size)] * worker_size
+        recv_request = [None] * worker_size
+        send_request = [None] * worker_size
+
+        for i in range(worker_size):
+            recv_request[i] = comm.Irecv(data[i], source=0, tag=tag_gradient_trans)
+
+        MPI.Request.Waitall(recv_request)
+
+        grads = [dict(pickle.loads(i)) for i in data]
+
+        optimizer.zero_grad()
+        for name, param in model.named_parameters():
+            param.grad = sum([grad[name] for grad in grads])
+        optimizer.step()
+
+        for i in range(worker_size):
+            send_request[i] = comm.Isend(pickle.dumps(model.state_dict()), dest=0, tag=tag_params_trans)
+        MPI.Request.Waitall(send_request)
+
+else:
     model = nn.Linear(input_size, output_size)
 
     # Loss and optimizer
@@ -51,28 +80,11 @@ if rank == 0:
         # Backward and optimize
         optimizer.zero_grad()
         loss.backward()
-        optimizer.step()
         grads = {name: param.grad for name, param in model.named_parameters()}
 
-        comm.Send(pickle.dumps(grads), dest=1, tag=200)
+        comm.Send(pickle.dumps(grads), dest=1, tag=tag_gradient_trans)
 
-        data = bytearray(10000)
-        comm.Recv(data, source=1, tag=300)
+        data = bytearray(trans_size)
+        comm.Recv(data, source=1, tag=tag_params_trans)
         remote_state_dict = OrderedDict(pickle.loads(data))
         model.load_state_dict(remote_state_dict)
-
-else:
-    model = nn.Linear(input_size, output_size)
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-
-    for epoch in range(num_epochs):
-        data = bytearray(10000)
-        comm.Recv(data, source=0, tag=200)
-        remote_grads = dict(pickle.loads(data))
-
-        optimizer.zero_grad()
-        for name, param in model.named_parameters():
-            param.grad = remote_grads[name]
-        optimizer.step()
-
-        comm.Send(pickle.dumps(model.state_dict()), dest=0, tag=300)
