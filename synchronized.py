@@ -67,13 +67,13 @@ class NeuralNet(nn.Module):
         return out
 
 
-model = NeuralNet(input_size, hidden_size, num_classes).to(device)
+model = NeuralNet(input_size, hidden_size, num_classes)
 trans_size = sys.getsizeof(pickle.dumps(model.state_dict()))
+del model
 
 if rank == server_rank:
     model = NeuralNet(input_size, hidden_size, num_classes).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    data = [bytearray(trans_size)] * worker_size
     recv_request = [None] * worker_size
     send_request = [None] * worker_size
 
@@ -83,15 +83,18 @@ if rank == server_rank:
                 send_request[i] = comm.Isend(pickle.dumps(model.state_dict()), dest=i, tag=tag_params_trans)
             MPI.Request.Waitall(send_request)
 
+            data = list()
+            recv_buf = bytearray(trans_size)
             for i in range(worker_size):
-                recv_request[i] = comm.Irecv(data[i], source=i, tag=tag_gradient_trans)
-            MPI.Request.Waitall(recv_request)
+                recv_request[i] = comm.Irecv(recv_buf, source=i, tag=tag_gradient_trans)
+                MPI.Request.Wait(recv_request[i])
+                data.append(recv_buf.copy())
 
             grads = [dict(pickle.loads(i)) for i in data]
 
             optimizer.zero_grad()
             for name, param in model.named_parameters():
-                param.grad = sum([grad[name] for grad in grads])
+                param.grad = torch.mean(torch.stack([grad[name] for grad in grads]), dim=0)
             optimizer.step()
 
     with torch.no_grad():
@@ -109,16 +112,16 @@ if rank == server_rank:
 
 else:
     model = NeuralNet(input_size, hidden_size, num_classes).to(device)
-    data = bytearray(trans_size)
 
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     # Train the model
     total_step = len(train_loader)
     for epoch in range(num_epochs):
         for i, (images, labels) in enumerate(train_loader):
+            data = bytearray(trans_size)
+
             comm.Recv(data, source=server_rank, tag=tag_params_trans)
             remote_state_dict = OrderedDict(pickle.loads(data))
             model.load_state_dict(remote_state_dict)
@@ -132,9 +135,12 @@ else:
             loss = criterion(outputs, labels)
 
             # Backward and optimize
-            optimizer.zero_grad()
+            model.zero_grad()
             loss.backward()
 
             grads = {name: param.grad for name, param in model.named_parameters()}
-
             comm.Send(pickle.dumps(grads), dest=server_rank, tag=tag_gradient_trans)
+
+            if (i + 1) % 100 == 0:
+                print('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}'
+                      .format(epoch + 1, num_epochs, i + 1, total_step, loss.item()))
