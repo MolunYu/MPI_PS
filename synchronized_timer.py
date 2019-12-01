@@ -27,7 +27,7 @@ tag_params_trans = 1
 input_size = 784
 hidden_size = 500
 num_classes = 10
-num_epochs = 5
+num_epochs = 10
 batch_size = 128
 learning_rate = 0.001
 
