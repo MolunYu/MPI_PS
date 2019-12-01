@@ -1,7 +1,6 @@
 import torch
 import sys
 import torch.nn as nn
-import pickle
 import torchvision
 import torch.utils.data as data
 import torchvision.transforms as transforms
@@ -68,7 +67,7 @@ class NeuralNet(nn.Module):
 
 
 model = NeuralNet(input_size, hidden_size, num_classes)
-trans_size = sys.getsizeof(pickle.dumps(model.state_dict()))
+trans_size = sys.getsizeof(MPI.pickle.dumps(model.state_dict()))
 del model
 
 if rank == server_rank:
@@ -88,9 +87,6 @@ if rank == server_rank:
             for i in range(worker_size):
                 recv_request[i] = comm.irecv(recv_buf ,source=i, tag=tag_gradient_trans)
                 data[i] = MPI.Request.wait(recv_request[i])
-
-            if data[0] == data[1] == data[2] == data[3]:
-                print("Fuck")
 
             grads = [dict(MPI.pickle.loads(i)) for i in data]
 
