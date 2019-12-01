@@ -76,21 +76,23 @@ if rank == server_rank:
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     recv_request = [None] * worker_size
     send_request = [None] * worker_size
+    data = [None] * worker_size
+    recv_buf = bytearray(trans_size)
 
     for epoch in range(num_epochs):
         for _ in train_loader:
             for i in range(worker_size):
-                send_request[i] = comm.Isend(pickle.dumps(model.state_dict()), dest=i, tag=tag_params_trans)
+                send_request[i] = comm.isend(MPI.pickle.dumps(model.state_dict()), dest=i, tag=tag_params_trans)
             MPI.Request.Waitall(send_request)
 
-            data = list()
-            recv_buf = bytearray(trans_size)
             for i in range(worker_size):
-                recv_request[i] = comm.Irecv(recv_buf, source=i, tag=tag_gradient_trans)
-                MPI.Request.Wait(recv_request[i])
-                data.append(recv_buf.copy())
+                recv_request[i] = comm.irecv(recv_buf ,source=i, tag=tag_gradient_trans)
+                data[i] = MPI.Request.wait(recv_request[i])
 
-            grads = [dict(pickle.loads(i)) for i in data]
+            if data[0] == data[1] == data[2] == data[3]:
+                print("Fuck")
+
+            grads = [dict(MPI.pickle.loads(i)) for i in data]
 
             optimizer.zero_grad()
             for name, param in model.named_parameters():
@@ -120,10 +122,8 @@ else:
     total_step = len(train_loader)
     for epoch in range(num_epochs):
         for i, (images, labels) in enumerate(train_loader):
-            data = bytearray(trans_size)
-
-            comm.Recv(data, source=server_rank, tag=tag_params_trans)
-            remote_state_dict = OrderedDict(pickle.loads(data))
+            data = comm.recv(source=server_rank, tag=tag_params_trans)
+            remote_state_dict = OrderedDict(MPI.pickle.loads(data))
             model.load_state_dict(remote_state_dict)
 
             # Move tensors to the configured device
@@ -139,7 +139,7 @@ else:
             loss.backward()
 
             grads = {name: param.grad for name, param in model.named_parameters()}
-            comm.Send(pickle.dumps(grads), dest=server_rank, tag=tag_gradient_trans)
+            comm.send(MPI.pickle.dumps(grads), dest=server_rank, tag=tag_gradient_trans)
 
             if (i + 1) % 100 == 0:
                 print('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}'
